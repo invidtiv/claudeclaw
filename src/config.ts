@@ -217,7 +217,7 @@ function parseAgenticConfig(raw: any): AgenticConfig {
   };
 }
 
-function parseSettings(raw: Record<string, any>): Settings {
+function parseSettings(raw: Record<string, any>, discordUserIds?: string[]): Settings {
   const rawLevel = raw.security?.level;
   const level: SecurityLevel =
     typeof rawLevel === "string" && VALID_LEVELS.has(rawLevel as SecurityLevel)
@@ -225,6 +225,14 @@ function parseSettings(raw: Record<string, any>): Settings {
       : "moderate";
 
   const parsedTimezone = parseTimezone(raw.timezone);
+
+  // Use regex-extracted Discord user IDs (preserves precision for snowflakes > 2^53)
+  // falling back to JSON-parsed values only when regex extraction wasn't provided.
+  const parsedDiscordUserIds = discordUserIds && discordUserIds.length > 0
+    ? discordUserIds
+    : Array.isArray(raw.discord?.allowedUserIds)
+      ? raw.discord.allowedUserIds.map(String)
+      : [];
 
   return {
     model: typeof raw.model === "string" ? raw.model.trim() : "",
@@ -249,9 +257,7 @@ function parseSettings(raw: Record<string, any>): Settings {
     },
     discord: {
       token: typeof raw.discord?.token === "string" ? raw.discord.token.trim() : "",
-      allowedUserIds: Array.isArray(raw.discord?.allowedUserIds)
-          ? raw.discord.allowedUserIds.map(String)
-          : [],
+      allowedUserIds: parsedDiscordUserIds,
       listenChannels: Array.isArray(raw.discord?.listenChannels)
         ? raw.discord.listenChannels.map(String)
         : [],

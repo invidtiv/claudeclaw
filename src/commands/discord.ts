@@ -1,4 +1,4 @@
-import { ensureProjectClaudeMd, run, runUserMessage, compactCurrentSession } from "../runner";
+import { ensureProjectClaudeMd, run, runUserMessage, compactCurrentSession, cleanupThreadQueue } from "../runner";
 import { getSettings, loadSettings } from "../config";
 import { resetSession, peekSession } from "../sessions";
 import { listThreadSessions, removeThreadSession, peekThreadSession } from "../sessionManager";
@@ -581,6 +581,7 @@ async function handleMessageCreate(token: string, message: DiscordMessage): Prom
           if (foundId) {
             try {
               await removeThreadSession(foundId);
+              cleanupThreadQueue(foundId);
               await discordApi(config.token, "DELETE", `/channels/${foundId}`);
               knownThreads.delete(foundId);
               results.push(`🗑️ **${targetName}** — deleted`);
@@ -1014,6 +1015,7 @@ function handleDispatch(token: string, eventName: string, data: any): void {
     case "THREAD_DELETE":
       if (data.id) {
         knownThreads.delete(data.id);
+        cleanupThreadQueue(data.id);
         removeThreadSession(data.id).catch((err) =>
           console.error(`[Discord] Failed to cleanup thread session: ${err}`),
         );
@@ -1025,6 +1027,7 @@ function handleDispatch(token: string, eventName: string, data: any): void {
       if (data.id && data.parent_id) {
         if (data.thread_metadata?.archived) {
           knownThreads.delete(data.id);
+          cleanupThreadQueue(data.id);
           removeThreadSession(data.id).catch((err) =>
             console.error(`[Discord] Failed to cleanup archived thread session: ${err}`),
           );

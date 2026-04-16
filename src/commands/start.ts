@@ -540,7 +540,7 @@ export async function start(args: string[] = []) {
       Date.now()
     );
 
-    function tick() {
+    async function tick(): Promise<void> {
       if (isHeartbeatExcludedNow(currentSettings.heartbeat, currentSettings.timezoneOffsetMinutes)) {
         console.log(`[${ts()}] Heartbeat skipped (excluded window)`);
         nextHeartbeatAt = nextAllowedHeartbeatAt(
@@ -551,28 +551,27 @@ export async function start(args: string[] = []) {
         );
         return;
       }
-      Promise.all([
-        resolvePrompt(currentSettings.heartbeat.prompt),
-        loadHeartbeatPromptTemplate(),
-      ])
-        .then(([prompt, template]) => {
-          const userPromptSection = prompt.trim()
-            ? `User custom heartbeat prompt:\n${prompt.trim()}`
-            : "";
-          const mergedPrompt = [template.trim(), userPromptSection]
-            .filter((part) => part.length > 0)
-            .join("\n\n");
-          if (!mergedPrompt) return null;
-          return run("heartbeat", mergedPrompt);
-        })
-        .then((r) => {
-          if (!r) return;
-          const shouldForward = currentSettings.heartbeat.forwardToTelegram || !r.stdout.trim().startsWith("HEARTBEAT_OK");
-          if (shouldForward) {
-            forwardToTelegram("", r);
-            forwardToDiscord("", r);
-          }
-        });
+      try {
+        const [prompt, template] = await Promise.all([
+          resolvePrompt(currentSettings.heartbeat.prompt),
+          loadHeartbeatPromptTemplate(),
+        ]);
+        const userPromptSection = prompt.trim()
+          ? `User custom heartbeat prompt:\n${prompt.trim()}`
+          : "";
+        const mergedPrompt = [template.trim(), userPromptSection]
+          .filter((part) => part.length > 0)
+          .join("\n\n");
+        if (!mergedPrompt) return;
+        const r = await run("heartbeat", mergedPrompt);
+        const shouldForward = currentSettings.heartbeat.forwardToTelegram || !r.stdout.trim().startsWith("HEARTBEAT_OK");
+        if (shouldForward) {
+          forwardToTelegram("", r);
+          forwardToDiscord("", r);
+        }
+      } catch (err) {
+        console.error(`[${ts()}] Heartbeat error: ${err instanceof Error ? err.message : err}`);
+      }
       nextHeartbeatAt = nextAllowedHeartbeatAt(
         currentSettings.heartbeat,
         currentSettings.timezoneOffsetMinutes,
@@ -581,9 +580,13 @@ export async function start(args: string[] = []) {
       );
     }
 
-    heartbeatTimer = setTimeout(function runAndReschedule() {
-      tick();
-      heartbeatTimer = setTimeout(runAndReschedule, ms);
+    // Schedule next heartbeat only after the current one completes,
+    // preventing overlapping heartbeats when execution exceeds the interval.
+    heartbeatTimer = setTimeout(async function runAndReschedule() {
+      await tick();
+      if (currentSettings.heartbeat.enabled) {
+        heartbeatTimer = setTimeout(runAndReschedule, ms);
+      }
     }, ms);
   }
 

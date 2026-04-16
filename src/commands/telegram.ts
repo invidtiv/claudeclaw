@@ -1,6 +1,7 @@
-import { ensureProjectClaudeMd, run, runUserMessage, compactCurrentSession } from "../runner";
+import { ensureProjectClaudeMd, run, runUserMessage, compactCurrentSession, cleanupThreadQueue } from "../runner";
 import { getSettings, loadSettings } from "../config";
 import { resetSession, peekSession } from "../sessions";
+import { listThreadSessions, removeThreadSession } from "../sessionManager";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
@@ -631,6 +632,18 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
     return;
   }
 
+  if (command === "/reset_thread") {
+    if (!isGroup || !threadId) {
+      await sendMessage(config.token, chatId, "This command only works inside a group topic/thread.", threadId);
+      return;
+    }
+    const sessionKey = `tg-${chatId}-${threadId}`;
+    await removeThreadSession(sessionKey);
+    cleanupThreadQueue(sessionKey);
+    await sendMessage(config.token, chatId, "Thread session reset. Next message starts fresh.", threadId);
+    return;
+  }
+
   if (command === "/status") {
     const session = await peekSession();
     const settings = getSettings();
@@ -648,6 +661,17 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       `Last used: ${session.lastUsedAt}`,
       `Compact warned: ${(session as any).compactWarned ? "yes" : "no"}`,
     ];
+    const threadSessions = await listThreadSessions();
+    const tgThreadSessions = threadSessions.filter((ts) => ts.threadId.startsWith("tg-"));
+    if (tgThreadSessions.length > 0) {
+      lines.push("", `**Telegram Thread Sessions:** ${tgThreadSessions.length}`);
+      for (const ts of tgThreadSessions.slice(0, 5)) {
+        lines.push(`  Thread \`${ts.threadId}\` → Session \`${ts.sessionId.slice(0, 8)}\` (${ts.turnCount} turns)`);
+      }
+      if (tgThreadSessions.length > 5) {
+        lines.push(`  ... and ${tgThreadSessions.length - 5} more`);
+      }
+    }
     await sendMessage(config.token, chatId, lines.join("\n"), threadId);
     return;
   }
@@ -773,7 +797,7 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
 
     // Skill routing: resolve slash commands to SKILL.md prompts
     let skillContext: string | null = null;
-    if (command && command !== "/start" && command !== "/reset" && command !== "/compact" && command !== "/status" && command !== "/context") {
+    if (command && command !== "/start" && command !== "/reset" && command !== "/compact" && command !== "/status" && command !== "/context" && command !== "/reset_thread") {
       try {
         skillContext = await resolveSkillPrompt(command);
         if (skillContext) {
@@ -832,7 +856,9 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       );
     }
     const prefixedPrompt = promptParts.join("\n");
-    const result = await runUserMessage("telegram", prefixedPrompt);
+    // Use thread-specific session for group topics; DMs and non-topic groups use global session
+    const sessionThreadId = (isGroup && threadId) ? `tg-${chatId}-${threadId}` : undefined;
+    const result = await runUserMessage("telegram", prefixedPrompt, sessionThreadId);
 
     if (result.exitCode !== 0) {
       await sendMessage(config.token, chatId, `Error (exit ${result.exitCode}): ${result.stderr || "Unknown error"}`, threadId);
@@ -918,6 +944,7 @@ async function registerBotCommands(token: string): Promise<void> {
       { command: "compact", description: "Compact session to reduce context size" },
       { command: "status", description: "Show current session status" },
       { command: "context", description: "Show context window usage" },
+      { command: "reset_thread", description: "Reset the current topic/thread session" },
     ];
     for (const skill of skills) {
       // Telegram commands: 1-32 chars, lowercase a-z, 0-9, underscores only
@@ -926,7 +953,7 @@ async function registerBotCommands(token: string): Promise<void> {
         .replace(/[-.:]/g, "_")
         .replace(/[^a-z0-9_]/g, "")
         .slice(0, 32);
-      if (!cmd || cmd === "start" || cmd === "reset") continue;
+      if (!cmd || cmd === "start" || cmd === "reset" || cmd === "reset_thread") continue;
       if (cmd.length > 30) continue;
       const desc = skill.description.length >= 3
         ? skill.description.slice(0, 256)

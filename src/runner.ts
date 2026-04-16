@@ -69,12 +69,24 @@ function enqueue<T>(fn: () => Promise<T>, threadId?: string): Promise<T> {
   if (threadId) {
     const current = threadQueues.get(threadId) ?? Promise.resolve();
     const task = current.then(fn, fn);
-    threadQueues.set(threadId, task.catch(() => {}));
+    const settled = task.catch(() => {});
+    threadQueues.set(threadId, settled);
+    // Auto-cleanup: remove entry once the queue drains (no pending work)
+    settled.then(() => {
+      if (threadQueues.get(threadId) === settled) {
+        threadQueues.delete(threadId);
+      }
+    });
     return task;
   }
   const task = globalQueue.then(fn, fn);
   globalQueue = task.catch(() => {});
   return task;
+}
+
+/** Remove a thread's queue entry (call when thread session is deleted). */
+export function cleanupThreadQueue(threadId: string): void {
+  threadQueues.delete(threadId);
 }
 
 function extractRateLimitMessage(stdout: string, stderr: string): string | null {
@@ -549,11 +561,14 @@ async function streamClaude(
   name: string,
   prompt: string,
   onChunk: (text: string) => void,
-  onUnblock: () => void
+  onUnblock: () => void,
+  threadId?: string
 ): Promise<void> {
   await mkdir(LOGS_DIR, { recursive: true });
 
-  const existing = await getSession();
+  const existing = threadId
+    ? await getThreadSession(threadId)
+    : await getSession();
   const { security, model, api } = getSettings();
   const securityArgs = buildSecurityArgs(security);
 
@@ -626,8 +641,13 @@ async function streamClaude(
           // Capture session ID for new sessions
           const sid = event.session_id as string | undefined;
           if (sid && !existing) {
-            await createSession(sid);
-            console.log(`[${new Date().toLocaleTimeString()}] Session created (stream-json): ${sid}`);
+            if (threadId) {
+              await createThreadSession(threadId, sid);
+              console.log(`[${new Date().toLocaleTimeString()}] Thread session created (stream-json): ${sid} (thread ${threadId.slice(0, 8)})`);
+            } else {
+              await createSession(sid);
+              console.log(`[${new Date().toLocaleTimeString()}] Session created (stream-json): ${sid}`);
+            }
           }
         } else if (event.type === "assistant") {
           // Text and tool_use blocks from the assistant
@@ -671,9 +691,10 @@ export async function streamUserMessage(
   name: string,
   prompt: string,
   onChunk: (text: string) => void,
-  onUnblock: () => void
+  onUnblock: () => void,
+  threadId?: string
 ): Promise<void> {
-  return enqueue(() => streamClaude(name, prefixUserMessageWithClock(prompt), onChunk, onUnblock));
+  return enqueue(() => streamClaude(name, prefixUserMessageWithClock(prompt), onChunk, onUnblock, threadId), threadId);
 }
 
 function prefixUserMessageWithClock(prompt: string): string {
