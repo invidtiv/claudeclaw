@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "fs/promises";
+import { mkdir, readFile, writeFile, realpath } from "fs/promises";
 import { join, resolve, sep } from "path";
 import { existsSync } from "fs";
 import { getSession, createSession, incrementTurn, markCompactWarned } from "./sessions";
@@ -239,17 +239,26 @@ export function agentDirKey(rawName: string, threadId: string): string {
 
 // Returns the working directory for a named agent's Claude spawn.
 // Works with any agent name — Discord-generated keys (from agentDirKey) or
-// raw filesystem directory names used by scheduled jobs. The only security
-// constraint is the resolve-under-agents/ check, which blocks path traversal
-// regardless of character set.
+// raw filesystem directory names used by scheduled jobs.
+// Security: uses realpath() after mkdir so symlinks are resolved before the
+// containment check. A lexical path.resolve() check is not sufficient because
+// a symlinked agents/<name> can point outside the repo and pass lexical checks.
 export async function ensureAgentDir(name: string): Promise<string> {
   const agentsRoot = join(PROJECT_DIR, "agents");
   const dir = join(agentsRoot, name);
+  // Lexical pre-check: reject obvious traversal before touching the filesystem
   if (!resolve(dir).startsWith(resolve(agentsRoot) + sep)) {
     throw new Error(`Agent directory "${dir}" would escape the agents root — rejecting`);
   }
   await mkdir(dir, { recursive: true });
-  return dir;
+  // Post-mkdir realpath check: resolves symlinks so a symlinked agent directory
+  // that points outside agents/ is caught even if it passed the lexical check.
+  const realDir = await realpath(dir);
+  const realRoot = await realpath(agentsRoot);
+  if (!realDir.startsWith(realRoot + sep)) {
+    throw new Error(`Agent directory "${realDir}" resolves outside the agents root via symlink — rejecting`);
+  }
+  return realDir;
 }
 
 const DIR_SCOPE_PROMPT = [
