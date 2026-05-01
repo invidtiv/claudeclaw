@@ -1,7 +1,15 @@
 import { mkdir, readFile, writeFile, realpath } from "fs/promises";
 import { join, resolve, sep } from "path";
 import { existsSync } from "fs";
-import { getSession, createSession, incrementTurn, markCompactWarned } from "./sessions";
+import {
+  getSession,
+  createSession,
+  incrementTurn,
+  markCompactWarned,
+  getFallbackSession,
+  createFallbackSession,
+  incrementFallbackTurn,
+} from "./sessions";
 import {
   getThreadSession,
   createThreadSession,
@@ -12,6 +20,7 @@ import { getSettings, DEFAULT_SESSION_TIMEOUT_MS, type ModelConfig, type Securit
 import { buildClockPromptPrefix } from "./timezone";
 import { selectModel } from "./model-router";
 import { recordResult, abortReason, clearSession, startSession } from "./watchdog";
+import { getPluginManager, type EventContext } from "./plugins";
 
 const LOGS_DIR = join(process.cwd(), ".claude/claudeclaw/logs");
 // Resolve prompts relative to the claudeclaw installation, not the project dir
@@ -86,6 +95,16 @@ function emitCompactEvent(event: CompactEvent): void {
   for (const listener of compactListeners) {
     try { listener(event); } catch {}
   }
+}
+
+function pluginCtx(threadId?: string, agentName?: string): EventContext {
+  return {
+    sessionKey: threadId || "global",
+    conversationId: threadId || "global",
+    channelId: threadId || "global",
+    agentId: agentName,
+    workspaceDir: process.cwd(),
+  };
 }
 
 export interface RunResult {
@@ -648,6 +667,11 @@ async function execClaude(
     `[${new Date().toLocaleTimeString()}] Running: ${name} (${isNew ? "new session" : `resume ${existing.sessionId.slice(0, 8)}`}, security: ${security.level})`
   );
 
+  // Plugins: before_agent_start — fired before Claude is invoked.
+  const pm = getPluginManager();
+  const ctx = pluginCtx(threadId, agentName);
+  if (pm) await pm.emit("before_agent_start", { prompt }, ctx);
+
   // stream-json emits NDJSON events as Claude works, including during subagent (Task tool)
   // orchestration. This keeps the process alive and producing output rather than silently
   // blocking until all spawned agents finish. --verbose is required for stream-json in
@@ -675,6 +699,12 @@ async function execClaude(
     console.error(`[${new Date().toLocaleTimeString()}] Failed to read project CLAUDE.md:`, e);
   }
 
+  // Plugins: before_prompt_build — lets plugins inject system context
+  if (pm) {
+    const pluginResult = await pm.emit("before_prompt_build", { prompt }, ctx);
+    if (pluginResult?.appendSystemContext) appendParts.push(pluginResult.appendSystemContext);
+  }
+
   if (security.level !== "unrestricted") appendParts.push(DIR_SCOPE_PROMPT);
   if (appendParts.length > 0) {
     args.push("--append-system-prompt", appendParts.join("\n\n"));
@@ -691,8 +721,26 @@ async function execClaude(
     console.warn(
       `[${new Date().toLocaleTimeString()}] Claude limit reached; retrying with fallback${fallbackConfig.model ? ` (${fallbackConfig.model})` : ""}...`
     );
-    exec = await runClaudeStream(args, fallbackConfig.model, fallbackConfig.api, baseEnv, timeoutMs, spawnCwd);
+    const fallbackSession = await getFallbackSession(agentName);
+    const fallbackArgs = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose", ...securityArgs];
+    if (fallbackSession) {
+      fallbackArgs.push("--resume", fallbackSession.sessionId);
+    }
+    if (appendParts.length > 0) {
+      fallbackArgs.push("--append-system-prompt", appendParts.join("\n\n"));
+    }
+    exec = await runClaudeStream(fallbackArgs, fallbackConfig.model, fallbackConfig.api, baseEnv, timeoutMs, spawnCwd);
     usedFallback = true;
+    const fallbackRateLimit = extractRateLimitMessage(exec.rawStdout, exec.stderr);
+    if (!fallbackRateLimit) {
+      if (!fallbackSession && exec.sessionId) {
+        await createFallbackSession(exec.sessionId, agentName);
+        const label = agentName ? ` (agent ${agentName})` : "";
+        console.log(`[${new Date().toLocaleTimeString()}] Fallback session created: ${exec.sessionId}${label}`);
+      } else if (fallbackSession) {
+        await incrementFallbackTurn(agentName);
+      }
+    }
   }
 
   const rawStdout = exec.rawStdout;
@@ -714,7 +762,7 @@ async function execClaude(
   // Capture session ID from stream events and persist for new sessions.
   // Gate only on isNew + sessionId present — not on exitCode, so a session that timed
   // out mid-run is still persisted and can be resumed on the next message.
-  if (!rateLimitMessage && isNew && exec.sessionId) {
+  if (!rateLimitMessage && isNew && exec.sessionId && !usedFallback) {
     sessionId = exec.sessionId;
     if (threadId) {
       await createThreadSession(threadId, sessionId);
@@ -732,6 +780,13 @@ async function execClaude(
     stderr,
     exitCode,
   };
+
+  // Plugins: agent_end — fire-and-forget, does not block response
+  if (pm && exitCode === 0) {
+    pm.emitAsync("agent_end", {
+      messages: [{ role: "assistant", content: stdout }],
+    }, ctx);
+  }
 
   const output = [
     `# ${name}`,
@@ -783,6 +838,7 @@ async function execClaude(
       spawnCwd
     );
     emitCompactEvent({ type: "auto-compact-done", success: compactOk });
+    if (compactOk && pm) pm.emitAsync("after_compaction", {}, ctx);
 
     if (compactOk) {
       console.log(`[${new Date().toLocaleTimeString()}] Retrying ${name} after compact...`);
@@ -850,6 +906,11 @@ async function streamClaude(
   const { security, model, api } = getSettings();
   const securityArgs = buildSecurityArgs(security);
 
+  // Plugins: before_agent_start
+  const streamPm = getPluginManager();
+  const streamCtx = pluginCtx();
+  if (streamPm) await streamPm.emit("before_agent_start", { prompt }, streamCtx);
+
   // stream-json gives us events as they happen — text before tool calls,
   // so we can unblock the UI as soon as Claude acknowledges, not after sub-agents finish.
   // --verbose is required for stream-json to produce output in -p (print) mode.
@@ -863,6 +924,12 @@ async function streamClaude(
     const claudeMd = await Bun.file(PROJECT_CLAUDE_MD).text();
     if (claudeMd.trim()) appendParts.push(claudeMd.trim());
   } catch {}
+
+  // Plugins: before_prompt_build
+  if (streamPm) {
+    const pluginResult = await streamPm.emit("before_prompt_build", { prompt }, streamCtx);
+    if (pluginResult?.appendSystemContext) appendParts.push(pluginResult.appendSystemContext);
+  }
 
   if (security.level !== "unrestricted") appendParts.push(DIR_SCOPE_PROMPT);
   if (appendParts.length > 0) {
@@ -930,6 +997,13 @@ async function streamClaude(
               hasActivity = true;
             } else if (block.type === "tool_use") {
               hasActivity = true;
+              if (streamPm && block.name) {
+                streamPm.emitAsync("tool_result_persist", {
+                  toolName: block.name,
+                  params: block.input ?? {},
+                  message: { content: [{ type: "text", text: JSON.stringify(block.input ?? {}).slice(0, 500) }] },
+                }, streamCtx);
+              }
             }
           }
           if (hasActivity) maybeUnblock();
@@ -951,6 +1025,9 @@ async function streamClaude(
   await proc.exited;
   // Ensure unblock fires even if something unexpected happened
   maybeUnblock();
+
+  // Plugins: agent_end
+  if (streamPm) streamPm.emitAsync("agent_end", { messages: [] }, streamCtx);
 
   console.log(`[${new Date().toLocaleTimeString()}] Done: ${name}`);
 }
