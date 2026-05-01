@@ -123,7 +123,7 @@ export interface AgentStreamEvent {
   result?: string;
 }
 
-const RATE_LIMIT_PATTERN = /you(?:'|')ve hit your limit/i;
+const RATE_LIMIT_PATTERN = /you(?:'|')ve hit your limit|out of extra usage/i;
 const RATE_LIMIT_RESET_PATTERN = /resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*\(?\s*UTC\s*\)?/i;
 
 // --- Rate limit state ---
