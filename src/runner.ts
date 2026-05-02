@@ -991,6 +991,8 @@ async function execClaude(
 
     if (threadId) {
       await removeThreadSession(threadId);
+    } else if (usedFallback) {
+      await resetFallbackSession(agentName);
     } else if (agentName) {
       await resetSession(agentName);
     } else {
