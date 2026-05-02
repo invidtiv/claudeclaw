@@ -129,7 +129,7 @@ class Vault:
         return imported
 
 
-# Instance globale
+# Global instance
 vault = Vault()
 
 
@@ -212,6 +212,7 @@ if __name__ == "__main__":
             print(f"ERROR: {e}", file=sys.stderr)
             sys.exit(1)
         if imported:
-            print(f"✅ Imported {len(imported)} key(s): {", ".join(sorted(imported))}")
+            imported_keys = ", ".join(sorted(imported))
+            print(f"✅ Imported {len(imported)} key(s): {imported_keys}")
         else:
             print("(no keys imported — file empty or all keys exist)")

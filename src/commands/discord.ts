@@ -359,17 +359,19 @@ async function uploadImageMessage(
 async function rejoinThreads(token: string): Promise<void> {
   const threadSessions = await listThreadSessions();
   for (const ts of threadSessions) {
-    // Skip non-snowflake keys (e.g. job names) — they are not Discord thread IDs
+    // Skip non-snowflake keys (e.g. job names); they are not Discord channel IDs.
     if (!/^\d{17,19}$/.test(ts.threadId)) continue;
     try {
+      const ch = await discordApi<{ parent_id?: string; name?: string; type?: number }>(token, "GET", `/channels/${ts.threadId}`);
+      const isThread = ch.type === 10 || ch.type === 11 || ch.type === 12;
+      if (!isThread) continue;
+
+      if (ch.parent_id && !knownThreads.has(ts.threadId)) {
+        upsertThread(ts.threadId, ch.parent_id, ch.name);
+      }
+
       await discordApi(token, "DELETE", `/channels/${ts.threadId}/thread-members/@me`).catch(() => {});
       await discordApi(token, "PUT", `/channels/${ts.threadId}/thread-members/@me`);
-      if (!knownThreads.has(ts.threadId)) {
-        const ch = await discordApi<{ parent_id?: string; name?: string }>(token, "GET", `/channels/${ts.threadId}`);
-        if (ch.parent_id) {
-          upsertThread(ts.threadId, ch.parent_id, ch.name);
-        }
-      }
       console.log(`[Discord] Rejoined thread: ${ts.threadId}`);
     } catch (err) {
       console.error(`[Discord] Failed to rejoin thread ${ts.threadId}: ${err}`);
