@@ -1206,7 +1206,8 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
     let streamMsgId: number | null = null;
     let hadToolLines = false;
     if (busy) {
-      result = await runFork(prefixedPrompt);
+      await sendMessage(config.token, chatId, "Claude is busy — try again in a moment, or use /fork for a quick parallel task.", threadId);
+      return;
     } else {
       const stream = makeStreamCallback(config.token, chatId, threadId, { verbose });
       result = await runUserMessage("telegram", prefixedPrompt, sessionKey, undefined, stream.onChunk, stream.onToolEvent);

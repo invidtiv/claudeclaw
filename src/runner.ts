@@ -1677,13 +1677,14 @@ const FORK_TIMEOUT_MS = 120_000;
  * cannot hang indefinitely or grow memory unbounded.
  */
 export async function runFork(prompt: string): Promise<RunResult> {
-  const { api } = getSettings();
+  const { api, security } = getSettings();
   const baseEnv = cleanSpawnEnv();
+  const securityArgs = buildSecurityArgs(security);
 
   const args = [
     CLAUDE_EXECUTABLE, "-p", prompt,
     "--output-format", "json",
-    "--dangerously-skip-permissions",
+    ...securityArgs,
     "--model", FORK_MODEL,
     "--append-system-prompt", FORK_SYSTEM_PROMPT,
   ];
